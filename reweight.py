@@ -1,28 +1,8 @@
-from typing import Optional, List, Dict
+from typing import Optional, List
 import torch
 import torch.nn as nn
 
 class ImportanceWeightModule(object):
-    r"""
-    Calculating class weight based on the output of discriminator.
-    Introduced by `Importance Weighted Adversarial Nets for Partial Domain Adaptation (CVPR 2018) <https://arxiv.org/abs/1803.09210>`_
-    Args:
-        discriminator (torch.nn.Module): A domain discriminator object, which predicts the domains of features.
-            Its input shape is :math:`(N, F)` and output shape is :math:`(N, 1)`
-        partial_classes_index (list[int], optional): The index of partial classes. Note that this parameter is \
-            just for debugging, since in real-world dataset, we have no access to the index of partial classes. \
-            Default: None.
-    Examples::
-        >>> domain_discriminator = DomainDiscriminator(1024, 1024)
-        >>> importance_weight_module = ImportanceWeightModule(domain_discriminator)
-        >>> num_iterations = 10000
-        >>> for _ in range(num_iterations):
-        >>>     # feature from source domain
-        >>>     f_s = torch.randn(32, 1024)
-        >>>     # importance weights for source instance
-        >>>     w_s = importance_weight_module.get_importance_weight(f_s)
-    """
-
     def __init__(self, discriminator: nn.Module, partial_classes_index: Optional[List[int]] = None):
         self.discriminator = discriminator
         self.partial_classes_index = partial_classes_index
@@ -42,15 +22,6 @@ class ImportanceWeightModule(object):
         return weight
 
     def get_partial_classes_weight(self, weights: torch.Tensor, labels: torch.Tensor):
-        """
-        Get class weight averaged on the partial classes and non-partial classes respectively.
-        Args:
-            weights (tensor): instance weight in shape :math:`(N, 1)`
-            labels (tensor): ground truth labels in shape :math:`(N, 1)`
-        .. warning::
-            This function is just for debugging, since in real-world dataset, we have no access to the index of \
-            partial classes and this function will throw an error when `partial_classes_index` is None.
-        """
         assert self.partial_classes_index is not None
 
         weights = weights.squeeze()

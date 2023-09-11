@@ -62,14 +62,6 @@ class Tesseract(DGLDataset):
         train_mask = self.create_mask(n_nodes, ids_train)
         val_mask = self.create_mask(n_nodes, ids_val)
 
-        # train_mask = self.create_mask(n_nodes, list(range(256)))
-        # val_mask = self.create_mask(n_nodes, list(range(256, 320)))
-        # ids_test = {
-        #     "2015-1": list(range(320, 448)),
-        #     "2015-2": list(range(448, 500)), 
-        #     "2015-3": list(range(500, 600))
-        # }
-
         g.ndata['train_mask'] = train_mask
         g.ndata['val_mask'] = val_mask
         g.ndata['test_mask'] = self.create_mask(n_nodes, ids_test)
@@ -77,7 +69,6 @@ class Tesseract(DGLDataset):
             test_mask = "test_mask_" + date
             g.ndata[test_mask] = self.create_mask(n_nodes, indices)
 
-        # self._g = dgl.to_bidirected(g)
         self._g = dgl.reorder_graph(g)
 
     def __getitem__(self, i):

@@ -1,51 +1,36 @@
 import torch
 import os
-import scipy.sparse as sp
 import numpy as np
-import json
 
 import random
 import datetime
 import time
-import warnings
-import sys
 import argparse
 import shutil
-import os.path as osp
-from typing import Tuple, Optional, List, Dict
-from functools import reduce
-import sklearn.metrics as skm
 
-import dgl
-import dgl.nn.pytorch as dglnn
 from dgl.dataloading import DataLoader, NeighborSampler
 
 import torch
-import torch.nn as nn
-import torch.backends.cudnn as cudnn
-import torch.optim as optim
 from torch.optim import SGD
 from torch.optim.lr_scheduler import LambdaLR
 import torch.nn.functional as F
 
 from tllib.modules.entropy import entropy
 from tllib.modules.domain_discriminator import DomainDiscriminator
-from reweight import ImportanceWeightModule
 from tllib.alignment.dann import DomainAdversarialLoss
 from tllib.utils.data import ForeverDataIterator
 from tllib.utils.metric import accuracy
 from tllib.utils.meter import AverageMeter, ProgressMeter
-from tllib.utils.logger import CompleteLogger
-from tllib.utils.analysis import tsne, a_distance
 
 from dataset import Tesseract
-from model import SAGE, MyClassifier
-from utils import collect_feature_monthly, collect_feature, inductive_split, load_subtensor, testing_monthly, compute_aut_metrics, evaluate
+from model import SAGE, Classifier
+from reweight import ImportanceWeightModule
+from utils import collect_feature, inductive_split, testing_monthly, compute_aut_metrics, evaluate
 
 import os
 
 def train(args, train_source_iter, train_target_iter, model,
-          domain_adv_D, domain_adv_D_0,
+          domain_adv_D_w, domain_adv_D,
           importance_weight_module, optimizer,
           lr_scheduler, epoch, device):
 
@@ -54,8 +39,8 @@ def train(args, train_source_iter, train_target_iter, model,
     losses = AverageMeter('Loss', ':6.2f')
     cls_accs = AverageMeter('Cls Acc', ':3.1f')
     tgt_accs = AverageMeter('Tgt Acc', ':3.1f')
+    domain_accs_D_w = AverageMeter('Domain Acc for D_w', ':3.1f')
     domain_accs_D = AverageMeter('Domain Acc for D', ':3.1f')
-    domain_accs_D_0 = AverageMeter('Domain Acc for D_0', ':3.1f')
     partial_classes_weights_s = AverageMeter('Source Partial Weight', ':3.2f')
     non_partial_classes_weights_s = AverageMeter('Source Non-Partial Weight', ':3.2f')
     partial_classes_weights_t = AverageMeter('Target Partial Weight', ':3.2f')
@@ -64,18 +49,17 @@ def train(args, train_source_iter, train_target_iter, model,
     progress = ProgressMeter(
         args.iters_per_epoch,
         [batch_time, data_time, losses, cls_accs, tgt_accs,
-         domain_accs_D, domain_accs_D_0, partial_classes_weights_s, non_partial_classes_weights_s,
+         domain_accs_D_w, domain_accs_D, partial_classes_weights_s, non_partial_classes_weights_s,
          partial_classes_weights_t, non_partial_classes_weights_t],
         prefix="Epoch: [{}]".format(epoch))
 
     # switch to train mode
     model.train()
+    domain_adv_D_w.train()
     domain_adv_D.train()
-    domain_adv_D_0.train()
 
     end = time.time()
-    cls_losses, advD_losses, advD0_losses, entropy_losses, losses_ = 0, 0, 0, 0, 0
-    # cls_losses, advD0_losses, entropy_losses, losses_ = 0, 0, 0, 0
+    cls_losses, advD_w_losses, advD_losses, entropy_losses, losses_ = 0, 0, 0, 0, 0
     for i in range(args.iters_per_epoch):
         _, _, blocks_s = next(train_source_iter)
         _, _, blocks_t = next(train_target_iter)
@@ -93,31 +77,23 @@ def train(args, train_source_iter, train_target_iter, model,
 
         # classification loss
         cls_loss = F.cross_entropy(y_s, labels_s)
-        # print("cls_loss: ", cls_loss.item())
 
-        # domain adversarial loss for D
-        adv_loss_D = domain_adv_D(f_s.detach(), f_t.detach())
-        # print("adv_loss_D: ", adv_loss_D.item())
+        # domain adversarial loss for D_w
+        adv_loss_D_w = domain_adv_D_w(f_s.detach(), f_t.detach())
 
         # get importance weights
         w_s = importance_weight_module.get_importance_weight(f_s, label=1)
         w_t = importance_weight_module.get_importance_weight(f_t, label=0)
 
-        # domain adversarial loss for D_0
-        adv_loss_D_0 = domain_adv_D_0(f_s, f_t, w_s=w_s, w_t=w_t)
-        # adv_loss_D_0 = domain_adv_D_0(f_s, f_t)
-        # adv_loss_D_0 = domain_adv_D_0(f_s, f_t, w_s=w_s)
-        # adv_loss_D_0 = domain_adv_D_0(f_s, f_t, w_t=w_t)
+        # domain adversarial loss for D
+        adv_loss_D = domain_adv_D(f_s, f_t, w_s=w_s, w_t=w_t)
         
         # entropy loss
         y_t = F.softmax(y_t, dim=1)
         entropy_loss = entropy(y_t, reduction='mean')
-        # print("entropy_loss: ", entropy_loss.item())
 
-        loss = cls_loss + 1.5 * args.trade_off * adv_loss_D + \
-               args.trade_off * adv_loss_D_0 + args.gamma * entropy_loss
-        # print("loss: ", loss.item())
-        # print()
+        loss = cls_loss + 1.5 * args.trade_off * adv_loss_D_w + \
+               args.trade_off * adv_loss_D + args.gamma * entropy_loss
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -129,16 +105,16 @@ def train(args, train_source_iter, train_target_iter, model,
         tgt_acc = accuracy(y_t, labels_t)[0]
 
         cls_losses += cls_loss.item()
+        advD_w_losses += adv_loss_D_w.item()
         advD_losses += adv_loss_D.item()
-        advD0_losses += adv_loss_D_0.item()
         entropy_losses += entropy_loss.item()
         losses_ += loss.item()
 
         losses.update(loss.item(), x_s.size(0))
         cls_accs.update(cls_acc.item(), x_s.size(0))
         tgt_accs.update(tgt_acc.item(), x_s.size(0))
+        domain_accs_D_w.update(domain_adv_D_w.domain_discriminator_accuracy, x_s.size(0))
         domain_accs_D.update(domain_adv_D.domain_discriminator_accuracy, x_s.size(0))
-        domain_accs_D_0.update(domain_adv_D_0.domain_discriminator_accuracy, x_s.size(0))
 
         # debug: output class weight averaged on the partial classes and non-partial classes respectively
         partial_class_weight_s, non_partial_classes_weight_s = \
@@ -156,12 +132,9 @@ def train(args, train_source_iter, train_target_iter, model,
 
         if i % args.print_freq == 0:
             progress.display(i)
-    return cls_losses/args.iters_per_epoch, advD_losses/args.iters_per_epoch,\
-           advD0_losses/args.iters_per_epoch, entropy_losses/args.iters_per_epoch,\
+    return cls_losses/args.iters_per_epoch, advD_w_losses/args.iters_per_epoch,\
+           advD_losses/args.iters_per_epoch, entropy_losses/args.iters_per_epoch,\
            losses_/args.iters_per_epoch
-    # return cls_losses/args.iters_per_epoch, 0,\
-    #        advD0_losses/args.iters_per_epoch, entropy_losses/args.iters_per_epoch,\
-    #        losses_/args.iters_per_epoch
 
 def run(args, data):
     train_g_s, train_g_t, val_g, test_g, timestamp, device, num_classes, save_path = data
@@ -187,7 +160,7 @@ def run(args, data):
     train_target_iter = ForeverDataIterator(train_target_loader)
 
     # Construct classifier
-    classifier = MyClassifier(SAGE(in_dim, args.num_hidden, args.num_hidden,
+    classifier = Classifier(SAGE(in_dim, args.num_hidden, args.num_hidden,
                                    args.num_layers, F.relu,
                                    args.drop_rate, args.agg),
                               num_classes, head=None, finetune=True).to(device)
@@ -200,29 +173,6 @@ def run(args, data):
         metrics = testing_monthly(args, getMonths, classifier, device, test_g)
         aut_acc, aut_f1, aut_p, aut_r = compute_aut_metrics(metrics)
         print("aut_acc {:.4f}\t aut_f1 {:.4f}\t aut_p {:.4f}\t aut_r {:.4f}".format(aut_acc, aut_f1, aut_p, aut_r))
-
-        # import pandas as pd
-        # from collections import defaultdict
-        # def seasonAUT(a, b, c):
-        #     return (a + 2 * b + c) / 4
-
-        # metrics = pd.DataFrame(metrics, columns=['period', 'acc', 'f1', 'p', 'r'])
-        # print(metrics)
-        # metrics.to_excel("results.xlsx", sheet_name='sheet1')
-        
-        # metrics = metrics.loc[:, 'acc':]
-        # ndata = defaultdict(list)
-        # for key, col in metrics.iteritems():
-        #     tmp = list()
-        #     for i in range(0, len(col), 3):
-        #         tmp.append(seasonAUT(col[i], col[i+1], col[i+2]))
-        #     ndata["AUT_" + key] = tmp
-        # ndata = pd.DataFrame(ndata)
-        # for col in ndata:
-        #     ndata[col] = ndata[col].round(decimals=4)
-        # print(ndata)
-        # ndata.to_excel("results2.xlsx", sheet_name='sheet1')
-
         end = datetime.datetime.now()
         print("Total testing time (split testing dataset & inference): %s" % (end - start))
 
@@ -246,9 +196,9 @@ def run(args, data):
         checkpoint = torch.load(os.path.join(save_path, "{}.pth".format(args.load_model)))
         classifier.load_state_dict(checkpoint)
 
-    # define domain classifier D, D_0
+    # define domain classifier D_w, D
+    D_w = DomainDiscriminator(in_feature=classifier.features_dim, hidden_size=1024, batch_norm=False, sigmoid=True).to(device)
     D = DomainDiscriminator(in_feature=classifier.features_dim, hidden_size=1024, batch_norm=False, sigmoid=True).to(device)
-    D_0 = DomainDiscriminator(in_feature=classifier.features_dim, hidden_size=1024, batch_norm=False, sigmoid=True).to(device)
 
     if args.phase == 'analysis':
 
@@ -256,12 +206,12 @@ def run(args, data):
         checkpoint_path = "./checkpoints/{}".format(args.timestamp)
         checkpoint = torch.load(os.path.join(checkpoint_path, "best.pth"))
         classifier.load_state_dict(checkpoint['classifier'])
-        D.load_state_dict(checkpoint['D'])
-        importance_weight_module = ImportanceWeightModule(D, [1])
+        D_w.load_state_dict(checkpoint['D_w'])
+        importance_weight_module = ImportanceWeightModule(D_w, [1])
 
         feature_extractor = classifier.backbone.to(device)
         all_features = collect_feature(args, test_g, feature_extractor, device)
-        torch.save(all_features, "./visual/features_drebin2.pt")
+        torch.save(all_features, "./visual/features.pt")
 
         source_sample = all_features[torch.cat((train_nid_s, val_nid), dim=0)]
         target_sample = all_features[train_nid_t]
@@ -272,22 +222,22 @@ def run(args, data):
         return
 
     # define optimizer and lr scheduler
-    optimizer = SGD(classifier.get_parameters() + D.get_parameters() + D_0.get_parameters(),
+    optimizer = SGD(classifier.get_parameters() + D_w.get_parameters() + D.get_parameters(),
                     args.lr, momentum=args.momentum, weight_decay=args.weight_decay, nesterov=True)
     lr_scheduler = LambdaLR(optimizer, lambda x: args.lr * (1. + args.lr_gamma * float(x)) ** (-args.lr_decay))
 
     # define loss function
+    domain_adv_D_w = DomainAdversarialLoss(D_w).to(device)
     domain_adv_D = DomainAdversarialLoss(D).to(device)
-    domain_adv_D_0 = DomainAdversarialLoss(D_0).to(device)
 
     # define importance weight module
-    importance_weight_module = ImportanceWeightModule(D, [1])
+    importance_weight_module = ImportanceWeightModule(D_w, [1])
 
     # start training
     best_f1 = 0.
     cls_losses = []
+    domain_D_w_losses = []
     domain_D_losses = []
-    domain_D0_losses = []
     entropy_losses = []
     losses = []
     if not os.path.exists(save_path):
@@ -299,32 +249,31 @@ def run(args, data):
     for epoch in range(args.num_epochs):
         # train for one epoch
         tic = time.time()
-        cls_loss, domain_D_loss, domain_D0_loss, entropy_loss, loss\
+        cls_loss, domain_D_w_loss, domain_D_loss, entropy_loss, loss\
         = train(args, train_source_iter, train_target_iter,
-                classifier, domain_adv_D, domain_adv_D_0,
+                classifier, domain_adv_D_w, domain_adv_D,
                 importance_weight_module, optimizer, lr_scheduler,
                 epoch, device)
         cls_losses.append(cls_loss)
+        domain_D_w_losses.append(domain_D_w_loss)
         domain_D_losses.append(domain_D_loss)
-        domain_D0_losses.append(domain_D0_loss)
         entropy_losses.append(entropy_loss)
         losses.append(loss)
 
         toc = time.time()
         print('Epoch Time(s): {:.4f}'.format(toc - tic))
+
         # evaluate on validation set
         eval_acc, eval_f1, eval_p, eval_r = evaluate(args, classifier, val_g, val_nid, device)
         print('Eval Acc {:.4f} | Eval F1: {:.4f} | Eval Precision: {:.4f} | Eval Recall: {:.4f}'
         .format(eval_acc, eval_f1, eval_p, eval_r))
 
-        # remember best f1 and save checkpoint
+        # record best f1 and save checkpoint
         torch.save({'classifier': classifier.state_dict(),
-                    'D': D.state_dict()}, os.path.join(checkpoint_path, "latest.pth"))
+                    'D_w': D_w.state_dict()}, os.path.join(checkpoint_path, "latest.pth"))
         if eval_f1 > best_f1:
             shutil.copy(os.path.join(checkpoint_path, "latest.pth"), os.path.join(checkpoint_path, "best.pth"))
         best_f1 = max(eval_f1, best_f1)
-        
-        # torch.save(classifier.state_dict(), os.path.join(checkpoint_path, "latest.pth"))
 
     print("best_f1 = {:3.1f}".format(best_f1))
 
@@ -339,7 +288,7 @@ def run(args, data):
 
     import pickle as pkl
     with open(os.path.join(checkpoint_path, "loss.pkl"), "wb") as f:
-        pkl.dump((cls_losses, domain_D_losses, domain_D0_losses, entropy_losses, losses), f)
+        pkl.dump((cls_losses, domain_D_w_losses, domain_D_losses, entropy_losses, losses), f)
 
     report_file = os.path.join(save_path, "reports.csv")
     with open(report_file, 'a') as f:
@@ -349,14 +298,8 @@ def run(args, data):
         f.write("\n")
 
 def getMonths():
-    # for year in [2013]:
-    #     for month in range(1, 13):
-    # for year in [2015]:
-    #     for month in range(1, 4):
-    # for year in [2015, 2016]:
-    #     for month in range(1, 13):
-    for year in [2012]:
-        for month in range(1, 11):
+    for year in [2015, 2016]:
+        for month in range(1, 13):
             period = "{}-{}".format(year, month)
             test_mask = "test_mask_" + period
             yield period, test_mask
@@ -394,7 +337,7 @@ if __name__ == "__main__":
                             help="Print confusion matrix during inference process.")
 
     # model testing/validation/ananlysis
-    argparser.add_argument('--timestamp', type=str, default='2023-03-02-22-48',
+    argparser.add_argument('--timestamp', type=str, default='',
                             help="Specify the name of trained model for testing/validation/analysis")
     argparser.add_argument("--phase", type=str, default='train', choices=['train', 'test', 'val', 'analysis'],
                         help="When phase is 'test', only test the model.")
@@ -417,10 +360,8 @@ if __name__ == "__main__":
 
     # Load Datasets
     start = datetime.datetime.now()
-    # data_dir = "/home/sunrui/data/GraphEvolveDroid"
-    # feat_mtx_file = "drebin_feat_mtx.npz"
-    data_dir = "/home/sunrui/data/drebin"
-    feat_mtx_file = "drebin_feat.npz"
+    data_dir = "/home/sunrui/data/GraphEvolveDroid"
+    feat_mtx_file = "drebin_feat_mtx.npz"
     adj_mtx_file = "drebin_knn_5.npz"
     dataset = Tesseract(data_dir, feat_mtx_file, adj_mtx_file)
     g = dataset[0]

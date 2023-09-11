@@ -1,7 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import dgl
 import dgl.nn as dglnn
 from dgl.dataloading import DataLoader, MultiLayerFullNeighborSampler
 
@@ -78,9 +76,9 @@ class SAGE(nn.Module):
             feat = y
         return y.to(device)
 
-class MyClassifier(nn.Module):
+class Classifier(nn.Module):
     def __init__(self, backbone, num_classes, head=None, finetune=True):
-        super(MyClassifier, self).__init__()
+        super(Classifier, self).__init__()
         self.backbone = backbone
         self.num_classes = num_classes
         self._features_dim = backbone.out_features

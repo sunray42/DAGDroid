@@ -1,8 +1,5 @@
 import os
-import scipy.sparse as sp
 import numpy as np
-import json
-import sklearn.metrics as skm
 import datetime
 import time
 import argparse
@@ -14,14 +11,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics.functional as MF
 import torch.optim as optim
-
-import dgl
-import dgl.nn.pytorch as dglnn
 from dgl.dataloading import DataLoader, NeighborSampler
 
-from model import SAGE, MyClassifier
+from model import SAGE, Classifier
 from dataset import Tesseract
-from utils import inductive_split, evaluate, compute_metrics, compute_aut_metrics, testing_monthly
+from utils import inductive_split, compute_aut_metrics, testing_monthly
 
 def run(args, device, train_g, model):
     train_nid = torch.nonzero(train_g.ndata['train_mask'], as_tuple=True)[0].to(device)
@@ -47,7 +41,7 @@ def run(args, device, train_g, model):
 
         tic_step = time.time()
         batch_loss = []
-        for step, (input_nodes, output_nodes, blocks) in enumerate(train_dataloader):
+        for step, (_, output_nodes, blocks) in enumerate(train_dataloader):
             x = blocks[0].srcdata['features'].to_dense()
             y = blocks[-1].dstdata['labels']
             y_hat, _ = model(blocks, x)
@@ -81,10 +75,6 @@ def getMonths():
     """
     A testing periods generator
     """
-    # for year in ['2013']:
-    #     for month in range(1, 13):
-    # for year in ['2015']:
-    #     for month in range(1, 4):
     for year in ['2015', '2016']:
         for month in range(1, 13):
             period = year + "-" + str(month)
@@ -160,7 +150,7 @@ if __name__ == "__main__":
     # 2 create model
     in_size = train_g.ndata['features'].shape[1]
     out_size = dataset.num_classes
-    model = MyClassifier(SAGE(in_size,
+    model = Classifier(SAGE(in_size,
                               args.num_hidden,
                               args.num_hidden,
                               args.num_layers,
