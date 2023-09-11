@@ -1,8 +1,5 @@
-# DAGDroid
-Source code for paper below:   
-**DAGDroid: Android Malware Detection Method for Concept Drift Using Domain
-Adversarial Graph Neural Networks**[paper]
-
+# DAGDroid: Android Malware Detection Method for Concept Drift Using Domain Adversarial Graph Neural Networks
+Source code, dependencies and usage. If you find it useful, star it please.
 
 ## Dependencies
 * Python 3.8.13
